@@ -1,28 +1,25 @@
-# uavlink
+# UAVLink
 
 This repository contains the implementation of our paper:
 
-**"ns3-uavlink: AI-Driven Dynamic MCS Scheduling for U2U Sidelink Communication"** (Submitted to vtc2025-fall, ac).
+**"ns3-uavlink: AI-Driven Dynamic MCS Scheduling for U2U Sidelink Communication"**
+(Accepted at VTC2025-Fall).
 
+---
 
+## Quick Start
 
-## Quick Start (Using Docker)
+To simplify the setup process, we provide a ready-to-use Docker image.
 
-We provide a ready-to-use Docker image to simplify the setup process.
+### Run the Container
 
-### 1. Pull Docker Image
-
-```bash
-docker pull rholand9/uavlink-ai:v1.1
-````
-
-### 2. Start a Container from the Image
+You can start the container directly. Docker will automatically pull the image if it’s not already available locally:
 
 ```bash
 docker run -it rholand9/uavlink-ai:v1.1 /bin/bash
 ```
 
-> Alternatively, you can use a Dockerfile to extend from this image and add customizations.
+> Alternatively, you can create your own Dockerfile based on this image to add custom configurations.
 
 ---
 
