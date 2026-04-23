@@ -39,7 +39,18 @@ PYBIND11_MODULE(uavlink_py, m)
                          throw std::runtime_error("Invalid size for selectedMcs.");
                     }
                     std::copy(array.data(), array.data() + obj.selectedMcs.size(), obj.selectedMcs.begin());
-               });
+               })
+          .def_property("interferencePerRb",
+               [](const ns3::RbgSinrFeature& obj) {
+                    return obj.interferencePerRb;
+               },
+               [](ns3::RbgSinrFeature& obj, py::array_t<double> array) {
+                    if (array.size() != obj.interferencePerRb.size()) {
+                         throw std::runtime_error("Invalid size for interferencePerRb.");
+                    }
+                    std::copy(array.data(), array.data() + obj.interferencePerRb.size(), obj.interferencePerRb.begin());
+               })
+          .def_readwrite("seq", &ns3::RbgSinrFeature::seq);
 
     py::class_<ns3::RbgSinrPrediction>(m, "PyActStruct")
           .def(py::init<>())

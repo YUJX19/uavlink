@@ -1,9 +1,6 @@
 # UAVLink
 
-This repository contains the implementation of our paper:
-
-**"ns3-uavlink: AI-Driven Dynamic MCS Scheduling for U2U Sidelink Communication"**
-(Accepted at VTC2025-Fall).
+This repository contains an implementation of AI-driven dynamic MCS scheduling for U2U sidelink communication.
 
 ---
 

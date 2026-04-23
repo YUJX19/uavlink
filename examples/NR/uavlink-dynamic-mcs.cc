@@ -121,30 +121,25 @@ UAVLinkSINR::SetMcs(const std::array<double, MAX_RBG_NUM>& sinr, const std::arra
  * \param[in] macs       An array of MCS values corresponding to the SINR values.
  */
 void
-UAVLinkSINR::SetMcs_6dof(const std::array<double, MAX_RBG_NUM_6DOF>& sinr_6dof, const std::array<double, MAX_RBG_NUM>& macs){
-    // Ensure input arrays have the expected size
-    if (sinr_6dof.size() != MAX_RBG_NUM_6DOF || macs.size() != MAX_RBG_NUM)
-    {
-        NS_LOG_ERROR("SetMacs: Input vector sizes are not equal to 40.");
-        return;
-    }
-
+UAVLinkSINR::SetMcs_6dof(const std::array<double, MAX_RBG_NUM_6DOF>& sinr_6dof,
+                          const std::array<double, MAX_RBG_NUM>& macs,
+                          const std::array<double, MAX_RBG_NUM>& interference)
+{
     UavLinkMsgInterfaceImpl<RbgSinrFeature, RbgSinrPrediction>* msgInterface =
         UavLinkMsgInterface::Get()->GetInterface<RbgSinrFeature, RbgSinrPrediction>();
     msgInterface->CppSendBegin();
 
-    // Store MCS values into shared memory
     for (size_t i = 0; i < MAX_RBG_NUM; ++i)
     {
-        // msgInterface->GetCpp2PyStruct()->wbsinr[i] = sinr_6dof[i];
         msgInterface->GetCpp2PyStruct()->selectedMcs[i] = macs[i];
+        msgInterface->GetCpp2PyStruct()->interferencePerRb[i] = interference[i];
     }
-
-    // Store SINR values for 6-DoF UAVs into shared memory
     for (size_t i = 0; i < MAX_RBG_NUM_6DOF; ++i)
     {
         msgInterface->GetCpp2PyStruct()->sinrPerRbg_6dof[i] = sinr_6dof[i];
     }
+    // Monotonic sequence counter — lets Python detect a stale/missed update.
+    msgInterface->GetCpp2PyStruct()->seq += 1;
     std::cout << std::endl;
     msgInterface->CppSendEnd();
 }

@@ -41,6 +41,14 @@ struct RbgSinrFeature
     std::array<double, MAX_RBG_NUM> sinrPerRbg; ///< SINR per RBG for standard UAV mobility
     std::array<double, MAX_RBG_NUM_6DOF> sinrPerRbg_6dof; ///< SINR per RBG for UAVs in 6-DoF mobility
     std::array<double, MAX_RBG_NUM> selectedMcs; ///< Current MCS index per RBG
+    /// Received interference power per RBG (linear, mW).
+    /// Zero in the 2-UAV scenario (no concurrent interferers); non-zero in
+    /// multi-UAV deployments where simultaneous PSSCH transmissions overlap.
+    std::array<double, MAX_RBG_NUM> interferencePerRb;
+    /// Monotonic sequence counter. Incremented by the C++ side on every
+    /// shared-memory write; Python reads it and warns if it does not advance.
+    /// Ensures Python always processes the latest data.
+    uint32_t seq;
 };
 
 /**
@@ -75,7 +83,9 @@ class UAVLinkSINR : public Object
     std::array<double, MAX_RBG_NUM> GetSinr();
 
     void SetMcs(const std::array<double, MAX_RBG_NUM>& sinr, const std::array<double, MAX_RBG_NUM>& mcs);
-    void SetMcs_6dof(const std::array<double, MAX_RBG_NUM_6DOF>& sinr_6dof, const std::array<double, MAX_RBG_NUM>& mcs);
+    void SetMcs_6dof(const std::array<double, MAX_RBG_NUM_6DOF>& sinr_6dof,
+                     const std::array<double, MAX_RBG_NUM>& mcs,
+                     const std::array<double, MAX_RBG_NUM>& interference);
     std::array<double, MAX_RBG_NUM> GetMcs();
 };
 

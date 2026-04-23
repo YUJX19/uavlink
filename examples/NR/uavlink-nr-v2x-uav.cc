@@ -78,6 +78,16 @@ using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("NrV2xWestToEastHighway");
 
+// Holds the AI-predicted MCS index for the next scheduling slot.
+// Written by the PSSCH-receive callback after Python returns predictions;
+// read by NrSlUeMacSchedulerDynamicMcs at both TB-sizing and grant-publication time.
+uint8_t g_ai_predicted_mcs = 14;
+
+// Cumulative PHY-layer BLER counters, incremented in NotifySlPsschRx.
+// Used after Simulator::Run() to report empirical BLER.
+uint64_t g_total_tb_rx = 0;
+uint64_t g_corrupt_tb_rx = 0;
+
 
 // Define MCS table entries (mapping SNR to SE)
 struct MCS {
@@ -86,21 +96,35 @@ struct MCS {
     int index;     // MCS Index
 };
 
-double speed_140 = 38.88889;        // meter per second, default 140 km/h
-double speed = 38.88889;        // meter per second, default 140 km/h
-double speed_120 = 33.33333;        // meter per second, default 120 km/h
-double speed_135 = 37.5;          // meter per second, default 135 km/h
+double speed_140 = 38.88889;  // m/s — UAV_A transmitter speed (140 km/h)
+double speed = 38.88889;      // m/s — default for other nodes
+double speed_120 = 33.33333;  // m/s — UAV_B at 120 km/h
+double speed_130 = 36.11111;  // m/s — UAV_B at 130 km/h
+double speed_135 = 37.5;      // m/s — UAV_B at 135 km/h
+// speed_rx is set from rxSpeedKmh at runtime (see cmd.AddValue below).
+double speed_rx = speed_135;
+
 uint16_t txNodeId_140 = 0;
 uint16_t rxNodeId_135 = 7;
 
-// Define function: Get corresponding SE and MCS Index based on SINR
+// SNR safety margin (dB) added to each table threshold when labelling the
+// ground-truth MCS. Table thresholds sit on BLER = 0.1 exactly, so a margin
+// is needed to keep realised BLER <= 0.1 under channel variability between
+// the slot SINR was measured in and the slot the TB is actually transmitted on.
+static constexpr double MCS_SNR_MARGIN_DB = 2.0;
+
+// Returns the highest-index MCS whose threshold + safety margin does not
+// exceed sinr, realising MCS* = argmax{MCS : BLER <= 0.1 | SINR} robustly.
 std::pair<double, int> GetSpectralEfficiencyAndMcs(double sinr, const std::vector<MCS>& mcsTable) {
+    std::pair<double, int> result = {mcsTable.front().se, mcsTable.front().index};
     for (const auto& mcs : mcsTable) {
-        if (sinr < mcs.snrDb) {
-            return {mcs.se, mcs.index};  // return the maximum SE and MCS Index less than current SINR
+        if (sinr >= mcs.snrDb + MCS_SNR_MARGIN_DB) {
+            result = {mcs.se, mcs.index};
+        } else {
+            break;  // table is sorted ascending; no further entry qualifies
         }
     }
-    return {mcsTable.back().se, mcsTable.back().index};  // if SINR exceeds maximum value, return maximum SE and Index
+    return result;
 }
 
 // Initialize MCS table
@@ -267,56 +291,79 @@ NotifySlPsschRx(UePhyPsschRxOutputStats* psschStats,
     }
     std::cout << std::endl;
 
-    cqiDl->SetMcs_6dof(sinr_6dof, mcs);
+    // interferencePerRb is zero in the 2-UAV scenario (no concurrent PSSCH interferers).
+    // In a multi-UAV deployment, populate this from the NrInterference module
+    // or from simultaneous-TX detection in the PSSCH sensing window.
+    std::array<double, MAX_RBG_NUM> interferencePerRb = {0.0};
+    cqiDl->SetMcs_6dof(sinr_6dof, mcs, interferencePerRb);
 
     std::array<double, MAX_RBG_NUM> new_p_mcs = cqiDl->GetMcs(); // initialize an array of size 10
 
-    // Calculate average spectral efficiency
+    // Update the scheduler MCS for the next slot with the AI-predicted value.
+    // NR SCI-1A carries a single MCS per grant; take the minimum across RBs so
+    // that BLER <= 0.1 is satisfied for every resource block (most conservative
+    // choice consistent with the per-RB BLER constraint).
+    {
+        uint8_t min_mcs = static_cast<uint8_t>(new_p_mcs[0]);
+        for (size_t i = 1; i < new_p_mcs.size(); ++i) {
+            uint8_t v = static_cast<uint8_t>(new_p_mcs[i]);
+            if (v < min_mcs) { min_mcs = v; }
+        }
+        g_ai_predicted_mcs = min_mcs;
+    }
+
+    // Accumulate PHY BLER statistics from the error model.
+    g_total_tb_rx++;
+    if (psschStatsParams.m_corrupt) { g_corrupt_tb_rx++; }
+    // TBLER predicted by the error model for the actual MCS and channel conditions.
+    // Used to penalise throughput: effective TT = ASE × BW × (1 − TBLER).
+    double slotTbler = psschStatsParams.m_tbler;
+
+    // Average SE across the 10 RBs using ground-truth MCS (correctly labelled after Fix A).
     double averageSE = totalSE / maxStored;
-    // Bandwidth parameter (in Hz)
     double totalBandwidthHz = 100e6;  // 100 MHz
-    double throughputBps = averageSE * totalBandwidthHz; // compute total throughput (bps)
-    double throughputMbps = throughputBps / 1e6; // convert to Mbps
+    // Effective throughput: multiply by (1 - TBLER) to account for the BLER constraint.
+    // When BLER <= 0.1, TT_gt >= 0.9 × ASE_gt × BW.
+    double throughputMbps = averageSE * totalBandwidthHz * (1.0 - slotTbler) / 1e6;
 
-    // Output results
     std::cout << "ASE_gt: " << averageSE << " bps/Hz" << std::endl;
-    std::cout << "TT_gt: " << throughputMbps << " Mbps" << std::endl;
+    std::cout << "TBLER_slot: " << slotTbler
+              << "  corrupt: " << psschStatsParams.m_corrupt << std::endl;
+    std::cout << "TT_gt: " << throughputMbps << " Mbps  [ASE_gt x BW x (1-TBLER)]" << std::endl;
 
-    // Print contents of new_p_mcs and compute total spectral efficiency
-    double ptotalSE = 0.0;  // total spectral efficiency
+    // Predicted SE from the AI-returned per-RB MCS vector.
+    double ptotalSE = 0.0;
     for (size_t i = 0; i < new_p_mcs.size(); ++i) {
-        int mcsIndex = static_cast<int>(new_p_mcs[i]);  // get MCS index
+        int mcsIndex = static_cast<int>(new_p_mcs[i]);
         std::cout << mcsIndex << " ";
         if (mcsIndex >= 0 && mcsIndex < static_cast<int>(mcsTable.size())) {
-            ptotalSE += mcsTable[mcsIndex].se;  // accumulate spectral efficiency
+            ptotalSE += mcsTable[mcsIndex].se;
         }
     }
     std::cout << std::endl;
-    // Calculate average spectral efficiency
+    double paverageSE = ptotalSE / maxStored;
+    // Apply the same slot TBLER penalty so the predicted TT is evaluated under
+    // the same channel conditions as TT_gt.
+    double pthroughputMbps = paverageSE * totalBandwidthHz * (1.0 - slotTbler) / 1e6;
 
-    double paverageSE = ptotalSE / maxStored;  // compute average spectral efficiency
-    double pthroughputBps = paverageSE * totalBandwidthHz;  // compute throughput
-    double pthroughputMbps = pthroughputBps / 1e6;  // convert to Mbps
-
-    // Output results based on new_p_mcs
     std::cout << "ASE_predicted: " << paverageSE << " bps/Hz" << std::endl;
-    std::cout << "TT_predicted: " << pthroughputMbps << " Mbps" << std::endl;
+    std::cout << "TT_predicted: " << pthroughputMbps << " Mbps  [ASE_pred x BW x (1-TBLER)]" << std::endl;
 
-    // ====================== Error comparison output ======================
     double seDifference = std::abs(paverageSE - averageSE);
     double throughputDifference = std::abs(pthroughputMbps - throughputMbps);
     std::cout << "Difference in ASE: " << seDifference << " bps/Hz" << std::endl;
     std::cout << "Difference in TT: " << throughputDifference << " Mbps" << std::endl;
 
-    // std::cout << "========================================" << std::endl;
     if (outFile.is_open()) {
-        outFile << averageSE << " "            // ASE_gt
-                << throughputMbps << " "       // TT_gt
-                << paverageSE << " "           // ASE_predicted
-                << pthroughputMbps << " "      // TT_predicted
-                << seDifference << " " // ASE Difference
-                << throughputDifference // TT Difference
-                << std::endl; // newline to separate records
+        outFile << averageSE << " "          // ASE_gt (bps/Hz)
+                << throughputMbps << " "     // TT_gt (Mbps, BLER-penalised)
+                << paverageSE << " "         // ASE_predicted (bps/Hz)
+                << pthroughputMbps << " "    // TT_predicted (Mbps, BLER-penalised)
+                << seDifference << " "       // ASE difference
+                << throughputDifference << " " // TT difference
+                << slotTbler << " "          // TBLER from error model
+                << static_cast<int>(psschStatsParams.m_corrupt) // 1=corrupt, 0=ok
+                << std::endl;
     } else {
         std::cerr << "Error: Unable to open file for writing." << std::endl;
     }
@@ -443,7 +490,7 @@ InstallHighwayMobility(uint16_t totalLanes,
             Vector(speed, 0.0, 0.0));
         }else if(i == rxNodeId_135){
             ueNodes.Get(i)->GetObject<ConstantVelocityMobilityModel>()->SetVelocity(
-            Vector(speed_135, 0.0, 0.0));
+            Vector(speed_rx, 0.0, 0.0));
         }else{
             ueNodes.Get(i)->GetObject<ConstantVelocityMobilityModel>()->SetVelocity(
             Vector(speed, 0.0, 0.0));
@@ -631,9 +678,16 @@ main(int argc, char* argv[])
     uint16_t t1 = 2;
     uint16_t t2 = 33;
     int slThresPsschRsrp = -128;
-    bool enableChannelRandomness = false;
+    // Default on: enables shadow fading and multipath scattering. Set to
+    // false with --enableChannelRandomness=0 for a deterministic ablation run.
+    bool enableChannelRandomness = true;
     uint16_t channelUpdatePeriod = 500; // ms
     uint8_t mcs = 14;
+    // UAV_B receiver speed in km/h; supported values: 135 / 130 / 120 km/h.
+    uint16_t rxSpeedKmh = 135;
+    // When true, use NrSlUeMacSchedulerFixedMcs (fixed-MCS baseline).
+    // When false, use NrSlUeMacSchedulerDynamicMcs driven by the AI predictions.
+    bool useFixedMcs = false;
 
     // flags to generate gnuplot plotting scripts
     bool generateInitialPosGnuScript = false;
@@ -726,6 +780,13 @@ main(int argc, char* argv[])
                  enableChannelRandomness);
     cmd.AddValue("channelUpdatePeriod", "The channel update period in ms", channelUpdatePeriod);
     cmd.AddValue("mcs", "The MCS to used for sidelink", mcs);
+    cmd.AddValue("rxSpeedKmh",
+                 "Speed of UAV_B receiver in km/h. Supported values: 135, 130, 120",
+                 rxSpeedKmh);
+    cmd.AddValue("useFixedMcs",
+                 "If true, use the fixed-MCS baseline scheduler; "
+                 "if false, use the AI-driven dynamic-MCS scheduler.",
+                 useFixedMcs);
     cmd.AddValue("outputDir", "directory where to store simulation results", outputDir);
     cmd.AddValue("simTag", "tag identifying the simulation campaigns", simTag);
     cmd.AddValue("generateInitialPosGnuScript",
@@ -737,6 +798,16 @@ main(int argc, char* argv[])
 
     // Parse the command line
     cmd.Parse(argc, argv);
+
+    // Resolve UAV_B receiver speed from the command-line km/h value.
+    // Only three speeds are supported.
+    NS_ABORT_MSG_UNLESS(rxSpeedKmh == 120 || rxSpeedKmh == 130 || rxSpeedKmh == 135,
+                        "rxSpeedKmh must be 120, 130, or 135 km/h");
+    if (rxSpeedKmh == 120)       { speed_rx = speed_120; }
+    else if (rxSpeedKmh == 130)  { speed_rx = speed_130; }
+    else                         { speed_rx = speed_135; }
+    std::cout << "UAV_B receiver speed: " << rxSpeedKmh << " km/h ("
+              << speed_rx << " m/s)" << std::endl;
 
     /*
      * Check if the frequency is in the allowed range.
@@ -946,8 +1017,16 @@ main(int argc, char* argv[])
      * In this example we use NrSlUeMacSchedulerSimple scheduler, which uses
      * a fixed MCS value
      */
-    // uavLinkHelper->SetNrSlSchedulerTypeId(NrSlUeMacSchedulerFixedMcs::GetTypeId());
-    uavLinkHelper->SetNrSlSchedulerTypeId(NrSlUeMacSchedulerDynamicMcs::GetTypeId());
+    if (useFixedMcs)
+    {
+        // Fixed-MCS baseline scheduler.
+        uavLinkHelper->SetNrSlSchedulerTypeId(NrSlUeMacSchedulerFixedMcs::GetTypeId());
+    }
+    else
+    {
+        // AI-driven dynamic-MCS scheduler.
+        uavLinkHelper->SetNrSlSchedulerTypeId(NrSlUeMacSchedulerDynamicMcs::GetTypeId());
+    }
     uavLinkHelper->SetUeSlSchedulerAttribute("Mcs", UintegerValue(mcs));
 
     /*
@@ -1380,6 +1459,45 @@ main(int argc, char* argv[])
 
     Simulator::Stop(simStopTime);
     Simulator::Run();
+
+    // ======= End-of-simulation: actual application throughput and empirical BLER =======
+    // Query PacketSink for the total bytes delivered to the application layer.
+    // This is the only place where real packet throughput (not ASE-derived) can be reported
+    // because it requires the simulation to have finished.
+    uint64_t totalRxBytes = 0;
+    for (uint32_t i = 0; i < serverApps.GetN(); ++i)
+    {
+        Ptr<PacketSink> sink = DynamicCast<PacketSink>(serverApps.Get(i));
+        if (sink)
+        {
+            totalRxBytes += sink->GetTotalRx();
+        }
+    }
+    // txAppDuration is the actual application active window (excludes ramp-up jitter).
+    double actualTputMbps =
+        (txAppDuration > 0.0) ? (static_cast<double>(totalRxBytes) * 8.0 / txAppDuration / 1e6)
+                               : 0.0;
+    double empiricalBler =
+        (g_total_tb_rx > 0)
+            ? static_cast<double>(g_corrupt_tb_rx) / static_cast<double>(g_total_tb_rx)
+            : 0.0;
+
+    std::cout << "\n=== End-of-simulation metrics ===" << std::endl;
+    std::cout << "App-layer RX bytes      : " << totalRxBytes << " B" << std::endl;
+    std::cout << "Actual throughput       : " << actualTputMbps << " Mbps" << std::endl;
+    std::cout << "PHY BLER (empirical)    : " << empiricalBler << "  ("
+              << g_corrupt_tb_rx << " corrupt / " << g_total_tb_rx << " total TBs)" << std::endl;
+
+    if (outFile.is_open())
+    {
+        outFile << "# end_summary"
+                << " actual_tput_Mbps=" << actualTputMbps
+                << " phy_bler=" << empiricalBler
+                << " corrupt_tb=" << g_corrupt_tb_rx
+                << " total_tb=" << g_total_tb_rx
+                << std::endl;
+    }
+    // ===================================================================================
 
     // Close file stream
     if (outFile.is_open()) {

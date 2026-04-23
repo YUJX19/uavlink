@@ -24,6 +24,9 @@
         std::clog << "[imsi=" << GetMac()->GetImsi() << "] ";                                      \
     }
 
+// Defined in uavlink-nr-v2x-uav.cc; updated each slot by the PSSCH-receive callback.
+extern uint8_t g_ai_predicted_mcs;
+
 namespace ns3
 {
 
@@ -738,7 +741,7 @@ NrSlUeMacSchedulerDynamicMcs::LogicalChannelPrioritization(
     uint32_t bufferSize = 0;
     uint32_t nLcsInQueue = 0;
     uint32_t candResoTbSize = 0;
-    uint8_t dstMcs = itDstInfo->second->GetDstMcs();
+    uint8_t dstMcs = g_ai_predicted_mcs;
     // XXX Assume here that every slot has only 9 symbols (worst case with PSFCH)
     // We may need to refine this in the future depending on PSFCH configuration
     // If there is no PSFCH, then symbols per slot = 12.  If PSFCH period is 1,
@@ -1785,7 +1788,7 @@ NrSlUeMacSchedulerDynamicMcs::DoNrSlAllocation(
         slotAlloc.dstL2Id = dstInfo->GetDstL2Id();
         slotAlloc.priority = allocationInfo.m_priority;
         slotAlloc.slRlcPduInfo = allocationInfo.m_allocatedRlcPdus;
-        slotAlloc.mcs = dstInfo->GetDstMcs();
+        slotAlloc.mcs = g_ai_predicted_mcs;
         // PSCCH
         slotAlloc.numSlPscchRbs = itTxOpps->numSlPscchRbs;
         slotAlloc.slPscchSymStart = itTxOpps->slPscchSymStart;
