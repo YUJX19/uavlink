@@ -94,6 +94,25 @@ See [LICENSE](LICENSE) for details.
 
 ---
 
+## About
+
+If our repo helps your academic projects, please cite our paper. Thank you!
+
+```bibtex
+@INPROCEEDINGS{11310275,
+  author={Yu, Jingxiang and Jiang, Hong},
+  booktitle={2025 IEEE 102nd Vehicular Technology Conference (VTC2025-Fall)}, 
+  title={ns3-uavlink: AI-Driven Dynamic MCS Scheduling for U2U Sidelink Communication}, 
+  year={2025},
+  volume={},
+  number={},
+  pages={1-5},
+  doi={10.1109/VTC2025-Fall65116.2025.11310275}
+}
+```
+
+---
+
 ## Acknowledgment
 
 This project builds on top of [ns-3-dev](https://www.nsnam.org/) and NR module from CTTC.
